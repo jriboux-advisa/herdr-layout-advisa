@@ -1,0 +1,32 @@
+#!/bin/bash
+# Shell des terminaux herdr-core (shell = [...] dans ~/.config/herdr-core/config.toml).
+# Dans un terminal récupéré après une perte (redémarrage, crash, claude-pause), la session
+# Claude mémorisée par hc-claude-hook dans le label claude.session revient en pause : elle
+# ne se recharge que sur Entrée, et seulement si elle ne tourne pas ailleurs.
+# Sinon, et ensuite, c'est zsh tel quel.
+if [[ -n ${HC_TERMINAL_ID:-} && -t 0 ]]; then
+  t=$("$HOME/.local/bin/herdr-core" get "$HC_TERMINAL_ID" --json 2>/dev/null)
+  id=$(jq -r '.labels["claude.session"] // empty' <<<"$t" 2>/dev/null)
+  if [[ -n $id ]]; then
+    for f in "$HOME"/.claude/sessions/*.json; do
+      [[ -e $f ]] && kill -0 "$(basename "$f" .json)" 2>/dev/null &&
+        [[ $(jq -r '.sessionId // empty' "$f" 2>/dev/null) == "$id" ]] && id= && break
+    done
+  fi
+  if [[ -n $id ]]; then
+    # Le titre est celui de l'onglet, que herdr-app tient à jour dans le label where.
+    titre=$(jq -r '.labels.where // empty | sub("^[^/]*/ "; "")' <<<"$t" 2>/dev/null)
+    printf '\n  \e[1m⏸  Session Claude en pause\e[0m · %s\n\n  \e[2mEntrée : reprendre · Ctrl+C : shell\e[0m\n' "${titre:-$id}"
+    # Ctrl+C (le piège s'exécute pendant read) ou Ctrl+D : le shell, la session reste
+    # mémorisée.
+    trap 'exec /bin/zsh "$@"' INT
+    read -rs || exec /bin/zsh "$@"
+    trap - INT
+    # Comme les onglets de herdr-app : un zsh interactif met claude au premier plan du
+    # terminal (hc-claude-hook s'y fie), puis redevient un shell quand claude se termine.
+    # Par la fonction claude du .zshrc, pas par le binaire : elle ajoute
+    # CLAUDE_CODE_FORCE_TERMINAL_IMAGES dans herdr-app (sinon, pas d'images ni de pet).
+    exec /bin/zsh -ic 'claude "$@"; exec /bin/zsh -i' /bin/zsh --resume "$id"
+  fi
+fi
+exec /bin/zsh "$@"

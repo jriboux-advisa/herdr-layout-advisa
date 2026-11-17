@@ -1,0 +1,46 @@
+#!/bin/bash
+# Hook Claude Code SessionStart/SessionEnd pour herdr-core (herdr-app).
+# Mémorise la session Claude dans le label claude.session du terminal hc, pour que
+# hc-shell la relance si le terminal est récupéré après une perte (redémarrage, crash).
+# Le label est retiré quand on quitte Claude soi-même (/exit, Ctrl+D, Ctrl+C).
+[[ -n ${HC_TERMINAL_ID:-} ]] || exit 0
+hc="$HOME/.local/bin/herdr-core"
+in=$(cat)
+
+# Seulement pour le claude au premier plan du terminal, pas un `claude -p` lancé par un outil
+p=$PPID
+while ((p > 1)) && [[ $(readlink "/proc/$p/exe") != */claude/versions/* ]]; do
+  p=$(ps -o ppid= -p "$p" | tr -d ' ')
+done
+fg=$("$hc" get "$HC_TERMINAL_ID" --json 2>/dev/null | jq -r '.foreground.pid // empty')
+[[ $p == "$fg" ]] || exit 0
+
+case $(jq -r .hook_event_name <<<"$in") in
+  SessionStart)
+    "$hc" label "$HC_TERMINAL_ID" "claude.session=$(jq -r .session_id <<<"$in")" >/dev/null
+    # Une session qui (re)démarre n'a plus de sous-agents en cours.
+    "$hc" label "$HC_TERMINAL_ID" claude.subagents= >/dev/null
+    ;;
+  SubagentStart | SubagentStop)
+    # Les sous-agents de la session et leur état, pour la barre latérale de herdr-app
+    # (better-sidebar) : [{id, type, state: working|done, at}]. Un fini reste 15 min.
+    # Le verrou sérialise les sous-agents lancés en parallèle.
+    exec 9>"${XDG_RUNTIME_DIR:-/tmp}/hc-claude-subagents-$HC_TERMINAL_ID.lock"
+    flock -w 3 9 || exit 0
+    cur=$("$hc" get "$HC_TERMINAL_ID" --json 2>/dev/null | jq -c '(.labels["claude.subagents"] // "") | fromjson? // []')
+    new=$(jq -c --argjson cur "${cur:-[]}" --argjson now "$(date +%s%3N)" '
+      . as $e
+      | ($cur | map(select(.state == "working" or $now - .at < 900000))) as $kept
+      | if $e.hook_event_name == "SubagentStart"
+        then $kept + [{id: $e.agent_id, type: $e.agent_type, state: "working", at: $now}]
+        else $kept | map(if .id == $e.agent_id then .state = "done" | .at = $now else . end)
+        end' <<<"$in")
+    [[ -n $new ]] && "$hc" label "$HC_TERMINAL_ID" "claude.subagents=$new" >/dev/null
+    ;;
+  SessionEnd)
+    case $(jq -r .reason <<<"$in") in
+      prompt_input_exit | logout) "$hc" label "$HC_TERMINAL_ID" claude.session= >/dev/null ;;
+    esac
+    ;;
+esac
+exit 0

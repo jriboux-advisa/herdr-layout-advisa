@@ -1,0 +1,40 @@
+#!/bin/bash
+# Met en pause des sessions Claude de herdr-app pour libérer leur mémoire, sans perdre leur
+# onglet. claude s'arrête, le label claude.session du terminal (posé par hc-claude-hook)
+# garde la session, puis le terminal est tué : herdr-core le récupère au même endroit et y
+# lance hc-shell, qui affiche la session en pause jusqu'à ce qu'on appuie sur Entrée.
+#
+#   claude-pause t5 t8    ces terminaux (sauf une session qui travaille)
+#
+# Le bouton pause de better-sidebar (survol d'une session ou d'un agent) l'appelle.
+set -u
+hc="$HOME/.local/bin/herdr-core"
+[[ -x $hc ]] || exit 0
+(($#)) || { sed -n '2,9s/^# \{0,1\}//p' "$0"; exit 2; }
+
+pause() {
+  local t=$1 j fg racine
+  j=$("$hc" get "$t" --json 2>/dev/null) || { echo "$t : terminal introuvable" >&2; return 1; }
+  [[ -n $(jq -r '.labels["claude.session"] // empty' <<<"$j") ]] ||
+    { echo "$t : aucune session Claude mémorisée" >&2; return 1; }
+  [[ $(jq -r '.foreground.name // empty' <<<"$j") == claude ]] ||
+    { echo "$t : claude ne tourne pas au premier plan" >&2; return 1; }
+  [[ $(jq -r '.status.state // empty' <<<"$j") != working ]] ||
+    { echo "$t : la session travaille, pas de pause" >&2; return 1; }
+  fg=$(jq -r .foreground.pid <<<"$j")
+  racine=$(jq -r .pid <<<"$j")
+  # SIGHUP laisse claude finir proprement et conserve le label (hc-claude-hook ne
+  # l'efface que quand on quitte soi-même).
+  if [[ $fg != "$racine" ]]; then
+    kill -HUP "$fg" 2>/dev/null
+    for _ in {1..50}; do kill -0 "$fg" 2>/dev/null || break; sleep 0.2; done
+  fi
+  # Tué par un signal, le terminal est récupéré par herdr-core (keep) ; sorti normalement,
+  # il serait fermé avec son onglet.
+  kill -KILL "$racine" 2>/dev/null
+  echo "$t : en pause"
+}
+
+ok=0
+for t; do pause "$t" || ok=1; done
+exit $ok
